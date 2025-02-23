@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tải Video TikTok</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            width: 300px;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #1DA1F2;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0a85d9;
+        }
+        .message {
+            margin-top: 20px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Tải Video TikTok</h1>
+    <input type="text" id="tiktokUrl" placeholder="Nhập liên kết TikTok...">
+    <button onclick="downloadVideo()">Tải về</button>
+    <div class="message" id="message"></div>
+</div>
+
+<script>
+    async function downloadVideo() {
+        const url = document.getElementById('tiktokUrl').value;
+        const messageElement = document.getElementById('message');
+        messageElement.innerText = 'Đang xử lý...';
+
+        try {
+            const response = await fetch('/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ url })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                const videoUrl = result.videoUrl;
+                const link = document.createElement('a');
+                link.href = videoUrl;
+                link.download = 'tiktok-video.mp4';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                messageElement.innerText = 'Tải về thành công!';
+            } else {
+                messageElement.innerText = 'Có lỗi xảy ra khi tải video.';
+            }
+        } catch (error) {
+            messageElement.innerText = 'Có lỗi xảy ra khi kết nối với server.';
+            console.error('Error:', error);
+        }
+    }
+</script>
+</body>
+</html>
