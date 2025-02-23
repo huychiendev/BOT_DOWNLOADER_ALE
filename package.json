@@ -1,0 +1,24 @@
+{
+  "name": "bot_tiktok_tikwm",
+  "version": "1.0.0",
+  "description": "Telegram bot for downloading TikTok and Douyin videos",
+  "main": "bot_download_douyin_tiktok.js",
+  "scripts": {
+    "tiktok": "node bot.js",
+    "bot": "node bot_download_douyin_tiktok.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "mongoose": "^8.2.0",
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "devDependencies": {
+    "express": "^4.19.2",
+    "mongoose": "^8.6.1"
+  }
+}
