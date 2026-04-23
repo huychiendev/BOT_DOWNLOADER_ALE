@@ -238,6 +238,100 @@ bot.on('message', async (msg) => {
     }
 });
 
+// Xử lý các link TikTok
+async function handleTiktokLinks(chatId, msg, links) {
+    const processingMessage = await bot.sendMessage(
+        chatId,
+        `Da them ${links.length} video vao hang doi. Dang xu ly...`
+    );
+
+    userQueues[chatId] = userQueues[chatId] || [];
+
+    const userName = msg.from.first_name + (msg.from.last_name ? ' ' + msg.from.last_name : '');
+    const userHandle = msg.from.username || 'N/A';
+
+    for (const link of links) {
+        const request = new Request({
+            userName,
+            userHandle,
+            chatId: chatId.toString(),
+            messageId: msg.message_id.toString(),
+            originalLink: link
+        });
+        await request.save();
+        userQueues[chatId].push(request);
+    }
+
+    if (userQueues[chatId].length === links.length) {
+        processQueue(chatId);
+    }
+
+    setTimeout(() => {
+        bot.deleteMessage(chatId, processingMessage.message_id)
+            .catch(error => console.error('Error deleting processing message:', error));
+    }, 5000);
+}
+
+// Dashboard HTML
+function generateDashboardHTML(videos, requests) {
+    const requestRows = requests.map(r => `
+        <tr>
+            <td>${r.userName}</td>
+            <td>${r.userHandle}</td>
+            <td><a href="${r.originalLink}" target="_blank">Original</a></td>
+            <td>${r.status}</td>
+            <td>${r.timestamp.toLocaleString()}</td>
+        </tr>
+    `).join('');
+
+    const videoRows = videos.map(v => `
+        <tr>
+            <td>${v.userName}</td>
+            <td>${v.userHandle}</td>
+            <td><a href="${v.originalLink}" target="_blank">Original</a></td>
+            <td><a href="${v.processedLink}" target="_blank">Processed</a></td>
+            <td>${v.timestamp.toLocaleString()}</td>
+        </tr>
+    `).join('');
+
+    return `
+        <html>
+            <head>
+                <title>TikTok Download Dashboard</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+                    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                    th { background-color: #f2f2f2; }
+                    h2 { margin-top: 30px; }
+                </style>
+            </head>
+            <body>
+                <h1>TikTok Download Dashboard</h1>
+                <h2>Download Requests</h2>
+                <table>
+                    <tr><th>User Name</th><th>User Handle</th><th>Original Link</th><th>Status</th><th>Timestamp</th></tr>
+                    ${requestRows}
+                </table>
+                <h2>Completed Downloads</h2>
+                <table>
+                    <tr><th>User Name</th><th>User Handle</th><th>Original Link</th><th>Processed Link</th><th>Timestamp</th></tr>
+                    ${videoRows}
+                </table>
+            </body>
+        </html>
+    `;
+}
+
+// Keep-alive ping
+async function pingApp(url) {
+    try {
+        await axios.get(url);
+    } catch (error) {
+        console.error('Ping failed:', error.message);
+    }
+}
+
 // Start server and keep-alive ping
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
