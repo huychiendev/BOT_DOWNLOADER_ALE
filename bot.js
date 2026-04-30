@@ -44,7 +44,7 @@ const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
 const BASE = 'https://www.tikwm.com';
-const MAX_VIDEO_SIZE = 45 * 1024 * 1024; // 45MB
+const MAX_VIDEO_SIZE = 45 * 1024 * 1024;
 
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
@@ -78,30 +78,28 @@ async function processLink(request) {
 
         if (response.data.code === 0) {
             const data = response.data.data;
-            const hdUrl = BASE + data.hdplay;
+            console.log('[DEBUG] hdplay:', data.hdplay);
+            console.log('[DEBUG] play:', data.play);
+            console.log('[DEBUG] hd_size:', data.hd_size);
+
+            const hdUrl = data.hdplay ? BASE + data.hdplay : null;
             const normalUrl = BASE + data.play;
             const hdSize = Number(data.hd_size) || 0;
-            const normalSize = Number(data.size) || 0;
 
-            console.log(`Size check - HD: ${hdSize} bytes, Normal: ${normalSize} bytes`);
+            let finalUrl = hdUrl || normalUrl;
+            let isHD = !!hdUrl;
 
-            let finalUrl = null;
-            let isHD = false;
-
-            if (hdSize > 0 && hdSize <= MAX_VIDEO_SIZE) {
-                finalUrl = hdUrl;
-                isHD = true;
-            } else if (normalSize > 0 && normalSize <= MAX_VIDEO_SIZE) {
+            // Force HD, chỉ fallback nếu HD quá lớn
+            if (hdUrl && hdSize > MAX_VIDEO_SIZE) {
                 finalUrl = normalUrl;
                 isHD = false;
             }
 
             if (finalUrl) {
-                await saveAndSendVideo(request, normalUrl, finalUrl, isHD);
+                await saveAndSendVideo(request, finalUrl, isHD);
             } else {
                 await Request.findByIdAndUpdate(request._id, {status: 'completed'});
-                await bot.sendMessage(request.chatId.toString(), 
-                    `Video quá nặng (>45MB)\nHD: ${hdUrl}\nGốc: ${request.originalLink}`);
+                await bot.sendMessage(request.chatId.toString(), `Video quá nặng (>45MB)\nHD: ${hdUrl || normalUrl}\nGốc: ${request.originalLink}`);
                 await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
             }
         } else {
@@ -113,7 +111,7 @@ async function processLink(request) {
     }
 }
 
-async function saveAndSendVideo(request, normalUrl, finalUrl, isHD) {
+async function saveAndSendVideo(request, finalUrl, isHD) {
     const video = new Video({
         userName: request.userName,
         userHandle: request.userHandle,
@@ -127,24 +125,18 @@ async function saveAndSendVideo(request, normalUrl, finalUrl, isHD) {
 
 async function sendVideoToTelegram(request, finalUrl, isHD) {
     try {
-        await sendAsDocument(request, finalUrl, isHD); // Dùng Document để giữ chất lượng gốc, không bị Telegram nén mờ
+        await bot.sendDocument(request.chatId.toString(), finalUrl, {
+            reply_markup: {
+                inline_keyboard: [[
+                    {text: 'Xem link gốc', url: request.originalLink},
+                    {text: `Link video ${isHD ? 'HD' : 'thường'}`, url: finalUrl}
+                ]]
+            }
+        });
+        await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
     } catch (error) {
-        console.log('Send failed, sending link');
-        await bot.sendMessage(request.chatId.toString(), 
-            `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
+        await bot.sendMessage(request.chatId.toString(), `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
     }
-}
-
-async function sendAsDocument(request, videoUrl, isHD) {
-    await bot.sendDocument(request.chatId.toString(), videoUrl, {
-        reply_markup: {
-            inline_keyboard: [[
-                {text: 'Xem link gốc', url: request.originalLink},
-                {text: `Link video ${isHD ? 'HD' : 'thường'}`, url: videoUrl}
-            ]]
-        }
-    });
-    await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
 }
 
 async function handleError(request, errorMessage) {
@@ -152,7 +144,7 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
-// ==================== USER VIDEOS ====================
+// User videos (cũng force HD)
 async function processUserVideos(chatId, username) {
     try {
         const formData = new FormData();
@@ -179,43 +171,26 @@ async function processUserVideoList(chatId, username, videos) {
     await bot.sendMessage(chatId, `Tìm thấy ${videos.length} video. Đang xử lý...`);
     videos.reverse();
     for (let video of videos) {
-        try {
-            await sendUserVideo(chatId, username, video);
-        } catch (e) {}
+        try { await sendUserVideo(chatId, username, video); } catch (e) {}
     }
     await bot.sendMessage(chatId, `Đã gửi xong từ: ${username}`);
 }
 
 async function sendUserVideo(chatId, username, video) {
-    const hdUrl = BASE + video.hdplay;
+    const hdUrl = video.hdplay ? BASE + video.hdplay : null;
     const normalUrl = BASE + video.play;
     const hdSize = Number(video.hd_size) || 0;
-    const normalSize = Number(video.size) || 0;
 
-    let finalUrl = null;
-    let isHD = false;
-    if (hdSize > 0 && hdSize <= MAX_VIDEO_SIZE) {
-        finalUrl = hdUrl;
-        isHD = true;
-    } else if (normalSize > 0 && normalSize <= MAX_VIDEO_SIZE) {
-        finalUrl = normalUrl;
-        isHD = false;
-    }
+    let finalUrl = hdUrl || normalUrl;
+    if (hdUrl && hdSize > MAX_VIDEO_SIZE) finalUrl = normalUrl;
 
-    if (finalUrl) {
-        await bot.sendDocument(chatId, finalUrl, {
-            reply_markup: {
-                inline_keyboard: [[
-                    {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`}
-                ]]
-            }
-        });
-    } else {
-        await bot.sendMessage(chatId, `Video quá nặng (>45MB): https://www.tiktok.com/@${username}/video/${video.video_id}`);
-    }
+    await bot.sendDocument(chatId, finalUrl, {
+        reply_markup: {
+            inline_keyboard: [[{text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}` }]]
+        }
+    });
 }
 
-// ==================== BOT HANDLER ====================
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
@@ -242,12 +217,7 @@ async function handleTiktokLinks(chatId, msg, links) {
     const userHandle = msg.from.username || 'N/A';
 
     for (const link of links) {
-        const req = new Request({ 
-            userName, userHandle, 
-            chatId: chatId.toString(), 
-            messageId: msg.message_id.toString(), 
-            originalLink: link 
-        });
+        const req = new Request({ userName, userHandle, chatId: chatId.toString(), messageId: msg.message_id.toString(), originalLink: link });
         await req.save();
         userQueues[chatId].push(req);
     }
@@ -262,4 +232,4 @@ function generateDashboardHTML(videos, requests) {
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started - HD + 45MB + sendDocument (không mờ)');
+console.log('Bot started - FORCE HD + sendDocument');
