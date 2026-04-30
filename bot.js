@@ -80,41 +80,33 @@ async function processLink(request) {
         if (response.data.code === 0) {
             const data = response.data.data;
 
-            // === CLEAN ESCAPED PATH (fix chính) ===
             let hdPath = (data.hdplay || '').replace(/\\\//g, '/');
             let normalPath = (data.play || '').replace(/\\\//g, '/');
 
             console.log('[DEBUG] hdplay cleaned:', hdPath);
-            console.log('[DEBUG] play cleaned:', normalPath);
             console.log('[DEBUG] hd_size:', data.hd_size);
 
             let finalUrl = null;
             let isHD = false;
 
-            // FORCE HDPLAY
             if (hdPath) {
                 finalUrl = BASE + hdPath;
                 isHD = true;
-                console.log('[DEBUG] → ĐÃ CHỌN HDPLAY');
             } else if (normalPath) {
                 finalUrl = BASE + normalPath;
                 isHD = false;
-                console.log('[DEBUG] → Fallback PLAY');
             }
 
-            // Kiểm tra size HD
             const hdSize = Number(data.hd_size) || 0;
             if (isHD && hdSize > MAX_VIDEO_SIZE) {
                 finalUrl = BASE + normalPath;
                 isHD = false;
-                console.log('[DEBUG] → HD quá lớn, fallback PLAY');
             }
 
             if (finalUrl) {
-                console.log('[DEBUG] Final URL:', finalUrl);
                 await saveAndSendVideo(request, finalUrl, isHD);
             } else {
-                await handleError(request, 'Không tìm thấy link video');
+                await handleError(request, 'Không tìm thấy link');
             }
         } else {
             await handleError(request, 'API error');
@@ -143,14 +135,14 @@ async function sendVideoToTelegram(request, finalUrl, isHD) {
             reply_markup: {
                 inline_keyboard: [[
                     {text: 'Xem link gốc', url: request.originalLink},
-                    {text: `Link video ${isHD ? 'HD' : 'thường'}`, url: finalUrl}
+                    {text: `Link HD`, url: finalUrl}
                 ]]
             }
         });
         await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
     } catch (error) {
         await bot.sendMessage(request.chatId.toString(), 
-            `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
+            `Video HD: ${finalUrl}\nGốc: ${request.originalLink}`);
     }
 }
 
@@ -159,7 +151,7 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
-// User videos (cùng fix escaped path)
+// User videos (force HD + clean path)
 async function processUserVideos(chatId, username) {
     try {
         const formData = new FormData();
@@ -193,15 +185,12 @@ async function processUserVideoList(chatId, username, videos) {
 
 async function sendUserVideo(chatId, username, video) {
     let hdPath = (video.hdplay || '').replace(/\\\//g, '/');
-    let normalPath = (video.play || '').replace(/\\\//g, '/');
-    let finalUrl = hdPath ? BASE + hdPath : BASE + normalPath;
-    const hdSize = Number(video.hd_size) || 0;
-    if (hdPath && hdSize > MAX_VIDEO_SIZE) finalUrl = BASE + normalPath;
-
+    let finalUrl = hdPath ? BASE + hdPath : BASE + (video.play || '').replace(/\\\//g, '/');
     await bot.sendDocument(chatId, finalUrl, {
         reply_markup: {
             inline_keyboard: [[
-                {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`}
+                {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`},
+                {text: 'Link HD', url: finalUrl}
             ]]
         }
     });
@@ -253,4 +242,4 @@ function generateDashboardHTML(videos, requests) {
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started - FIXED escaped hdplay + FORCE HD');
+console.log('Bot started - FORCE HDPLAY + clean path + gửi link HD trực tiếp');
