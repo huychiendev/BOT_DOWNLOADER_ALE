@@ -43,6 +43,9 @@ const requestSchema = new mongoose.Schema({
 const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
+const BASE = 'https://www.tikwm.com';
+const MAX_VIDEO_SIZE = 45 * 1024 * 1024; // 45MB
+
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
     try {
@@ -53,8 +56,6 @@ app.get('/', async (req, res) => {
         res.status(500).send('Error fetching download history');
     }
 });
-
-const BASE = 'https://www.tikwm.com';
 
 async function processQueue(chatId) {
     if (userQueues[chatId]?.length > 0) {
@@ -74,13 +75,36 @@ async function processLink(request) {
         formData.append('web', '1');
 
         const response = await axios.post(TIKWM_API, formData, {
-            headers: { ...formData.getHeaders(), 'Content-Type': 'multipart/form-data' }
+            headers: { ...formData.getHeaders() }
         });
 
         if (response.data.code === 0) {
-            const videoUrl = BASE + response.data.data.play;
-            const videoUrlhdplay = BASE + response.data.data.hdplay;
-            await saveAndSendVideo(request, videoUrl, videoUrlhdplay);
+            const data = response.data.data;
+            const hdUrl = BASE + data.hdplay;
+            const normalUrl = BASE + data.play;
+            const hdSize = Number(data.hd_size) || 0;
+            const normalSize = Number(data.size) || 0;
+
+            let finalUrl = null;
+            let isHD = false;
+
+            if (hdSize > 0 && hdSize <= MAX_VIDEO_SIZE) {
+                finalUrl = hdUrl;
+                isHD = true;
+            } else if (normalSize > 0 && normalSize <= MAX_VIDEO_SIZE) {
+                finalUrl = normalUrl;
+                isHD = false;
+            }
+
+            if (finalUrl) {
+                await saveAndSendVideo(request, normalUrl, finalUrl, isHD);
+            } else {
+                // quá nặng → chỉ gửi link HD
+                await Request.findByIdAndUpdate(request._id, {status: 'completed'});
+                await bot.sendMessage(request.chatId.toString(), 
+                    `Video quá nặng (>45MB), xem link HD: ${hdUrl}\nGốc: ${request.originalLink}`);
+                await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
+            }
         } else {
             await handleError(request, 'API error');
         }
@@ -90,29 +114,25 @@ async function processLink(request) {
     }
 }
 
-async function saveAndSendVideo(request, videoUrl, videoUrlhdplay) {
+async function saveAndSendVideo(request, normalUrl, finalUrl, isHD) {
     const video = new Video({
         userName: request.userName,
         userHandle: request.userHandle,
         originalLink: request.originalLink,
-        processedLink: videoUrlhdplay
+        processedLink: finalUrl
     });
     await video.save();
     await Request.findByIdAndUpdate(request._id, {status: 'completed'});
-    await sendVideoToTelegram(request, videoUrl, videoUrlhdplay);
+    await sendVideoToTelegram(request, normalUrl, finalUrl, isHD);
 }
 
-async function sendVideoToTelegram(request, videoUrl, videoUrlhdplay) {
+async function sendVideoToTelegram(request, normalUrl, finalUrl, isHD) {
     try {
-        await sendVideo(request, videoUrlhdplay, true);
+        await sendVideo(request, finalUrl, isHD);
     } catch (error) {
-        console.log('HD video failed, trying standard...', error);
-        try {
-            await sendVideo(request, videoUrl, false);
-        } catch (stdError) {
-            console.log('Standard video failed, sending link...', stdError);
-            await bot.sendMessage(request.chatId.toString(), `Không thể tải video, xem tại: ${videoUrlhdplay}`);
-        }
+        console.log('Send video failed, sending link');
+        await bot.sendMessage(request.chatId.toString(), 
+            `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
     }
 }
 
@@ -121,7 +141,7 @@ async function sendVideo(request, videoUrl, isHD) {
         reply_markup: {
             inline_keyboard: [[
                 {text: 'Xem link gốc', url: request.originalLink},
-                {text: `Xem link video ${isHD ? 'HD' : 'thường'}`, url: videoUrl}
+                {text: `Link video ${isHD ? 'HD' : 'thường'}`, url: videoUrl}
             ]]
         }
     });
@@ -133,6 +153,7 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
+// ==================== USER VIDEOS ====================
 async function processUserVideos(chatId, username) {
     try {
         const formData = new FormData();
@@ -141,17 +162,17 @@ async function processUserVideos(chatId, username) {
         formData.append('hd', '1');
         formData.append('web', '1');
 
-        await bot.sendMessage(chatId, `Đang tải tất cả video từ: ${username}. Vui lòng chờ...`);
+        await bot.sendMessage(chatId, `Đang tải video từ: ${username}...`);
         const response = await axios.post(TIKWM_USER_API, formData, { headers: formData.getHeaders() });
 
         if (response.data.code === 0) {
             await processUserVideoList(chatId, username, response.data.data.videos);
         } else {
-            await bot.sendMessage(chatId, `Không thể tải video từ tài khoản: ${username}`);
+            await bot.sendMessage(chatId, `Không tải được từ: ${username}`);
         }
     } catch (error) {
-        console.error('Error fetching user videos:', error);
-        await bot.sendMessage(chatId, `Lỗi khi tải video từ: ${username}`);
+        console.error('User videos error:', error);
+        await bot.sendMessage(chatId, `Lỗi tải video từ: ${username}`);
     }
 }
 
@@ -161,83 +182,82 @@ async function processUserVideoList(chatId, username, videos) {
     for (let video of videos) {
         try {
             await sendUserVideo(chatId, username, video);
-        } catch (error) {
-            console.log(`Failed video:`, error);
-        }
+        } catch (e) {}
     }
-    await bot.sendMessage(chatId, `Đã gửi xong tất cả video từ: ${username}`);
+    await bot.sendMessage(chatId, `Đã gửi xong từ: ${username}`);
 }
 
 async function sendUserVideo(chatId, username, video) {
-    await bot.sendVideo(chatId, BASE + video.play, {
-        reply_markup: {
-            inline_keyboard: [[
-                {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`}
-            ]]
-        }
-    });
+    const hdUrl = BASE + video.hdplay;
+    const normalUrl = BASE + video.play;
+    const hdSize = Number(video.hd_size) || 0;
+    const normalSize = Number(video.size) || 0;
+
+    let finalUrl = null;
+    if (hdSize > 0 && hdSize <= MAX_VIDEO_SIZE) {
+        finalUrl = hdUrl;
+    } else if (normalSize > 0 && normalSize <= MAX_VIDEO_SIZE) {
+        finalUrl = normalUrl;
+    }
+
+    if (finalUrl) {
+        await bot.sendVideo(chatId, finalUrl, {
+            reply_markup: {
+                inline_keyboard: [[
+                    {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`}
+                ]]
+            }
+        });
+    } else {
+        await bot.sendMessage(chatId, `Video quá nặng (>45MB): https://www.tiktok.com/@${username}/video/${video.video_id}`);
+    }
 }
 
+// ==================== BOT HANDLER ====================
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const messageText = msg.text;
-    if (!messageText) return await bot.sendMessage(chatId, 'No text found.');
+    const text = msg.text;
+    if (!text) return;
 
-    const usernameMatch = messageText.match(/^u:(.+)$/);
+    const usernameMatch = text.match(/^u:(.+)$/);
     if (usernameMatch) {
         await processUserVideos(chatId, usernameMatch[1]);
         return;
     }
 
-    const tiktokLinks = messageText.match(/https?:\/\/(?:www\.|vt\.)?tiktok\.com\/\S+/g);
-    if (tiktokLinks?.length > 0) {
-        await handleTiktokLinks(chatId, msg, tiktokLinks);
+    const links = text.match(/https?:\/\/(?:www\.|vt\.)?tiktok\.com\/\S+/g);
+    if (links?.length) {
+        await handleTiktokLinks(chatId, msg, links);
     } else {
-        await bot.sendMessage(chatId, 'Vui lòng gửi liên kết TikTok hợp lệ.');
+        await bot.sendMessage(chatId, 'Vui lòng gửi link TikTok.');
     }
 });
 
 async function handleTiktokLinks(chatId, msg, links) {
-    const processingMessage = await bot.sendMessage(chatId, `Đã thêm ${links.length} video vào hàng đợi. Đang xử lý...`);
+    const processingMsg = await bot.sendMessage(chatId, `Đã thêm ${links.length} video vào queue...`);
     userQueues[chatId] = userQueues[chatId] || [];
     const userName = msg.from.first_name + (msg.from.last_name ? ' ' + msg.from.last_name : '');
     const userHandle = msg.from.username || 'N/A';
 
     for (const link of links) {
-        const request = new Request({
-            userName, userHandle,
-            chatId: chatId.toString(),
-            messageId: msg.message_id.toString(),
-            originalLink: link
+        const req = new Request({ 
+            userName, userHandle, 
+            chatId: chatId.toString(), 
+            messageId: msg.message_id.toString(), 
+            originalLink: link 
         });
-        await request.save();
-        userQueues[chatId].push(request);
+        await req.save();
+        userQueues[chatId].push(req);
     }
-
     if (userQueues[chatId].length === links.length) processQueue(chatId);
 
-    setTimeout(() => bot.deleteMessage(chatId, processingMessage.message_id).catch(()=>{}), 5000);
+    setTimeout(() => bot.deleteMessage(chatId, processingMsg.message_id).catch(()=>{}), 5000);
 }
 
 function generateDashboardHTML(videos, requests) {
-    const requestRows = requests.map(r => `
-        <tr><td>${r.userName}</td><td>${r.userHandle}</td><td><a href="${r.originalLink}" target="_blank">Original</a></td><td>${r.status}</td><td>${r.timestamp.toLocaleString()}</td></tr>
-    `).join('');
-    const videoRows = videos.map(v => `
-        <tr><td>${v.userName}</td><td>${v.userHandle}</td><td><a href="${v.originalLink}" target="_blank">Original</a></td><td><a href="${v.processedLink}" target="_blank">Processed</a></td><td>${v.timestamp.toLocaleString()}</td></tr>
-    `).join('');
-
-    return `
-        <html><head><title>TikTok Download Dashboard</title>
-        <style>body{font-family:Arial;margin:0;padding:20px}table{width:100%;border-collapse:collapse;margin-bottom:20px}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background:#f2f2f2}</style>
-        </head><body>
-        <h1>TikTok Download Dashboard</h1>
-        <h2>Download Requests</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Status</th><th>Time</th></tr>${requestRows}</table>
-        <h2>Completed Downloads</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Processed</th><th>Time</th></tr>${videoRows}</table>
-        </body></html>
-    `;
+    return `<html><head><title>TikTok Dashboard</title><style>body{font-family:Arial;margin:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}</style></head><body><h1>TikTok Download Dashboard</h1><h2>Requests</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Status</th><th>Time</th></tr>${requests.map(r=>`<tr><td>${r.userName}</td><td>${r.userHandle}</td><td><a href="${r.originalLink}">link</a></td><td>${r.status}</td><td>${r.timestamp.toLocaleString()}</td></tr>`).join('')}</table><h2>Completed</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Processed</th><th>Time</th></tr>${videos.map(v=>`<tr><td>${v.userName}</td><td>${v.userHandle}</td><td><a href="${v.originalLink}">link</a></td><td><a href="${v.processedLink}">link</a></td><td>${v.timestamp.toLocaleString()}</td></tr>`).join('')}</table></body></html>`;
 }
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started');
+console.log('Bot started - HD + 45MB limit');
