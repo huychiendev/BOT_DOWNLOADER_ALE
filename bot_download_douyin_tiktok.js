@@ -94,19 +94,11 @@ async function processLink(request) {
         if (response.status === 200) {
             const videoData = response.data;
 
-            if (videoData.code === 200 || videoData.code === 0) {
+            if (videoData.code === 200) {
                 // Lấy URL video từ cấu trúc dữ liệu phù hợp
                 let videoUrl, hdVideoUrl;
 
-                if (videoData.code === 0 && videoData.data) {
-                    // Cấu trúc cho TikWM
-                    const base = 'https://www.tikwm.com';
-                    videoUrl = videoData.data.play;
-                    hdVideoUrl = videoData.data.hdplay;
-                    
-                    if (videoUrl && !videoUrl.startsWith('http')) videoUrl = base + videoUrl;
-                    if (hdVideoUrl && !hdVideoUrl.startsWith('http')) hdVideoUrl = base + hdVideoUrl;
-                } else if (videoData.data?.video?.play_addr?.url_list) {
+                if (videoData.data.video?.play_addr?.url_list) {
                     // Cấu trúc cho Douyin
                     videoUrl = videoData.data.video.play_addr.url_list[0];
                     hdVideoUrl = videoData.data.video.hd_play_addr?.url_list?.[0];
