@@ -74,9 +74,7 @@ async function processLink(request) {
         formData.append('hd', '1');
         formData.append('web', '1');
 
-        const response = await axios.post(TIKWM_API, formData, {
-            headers: { ...formData.getHeaders() }
-        });
+        const response = await axios.post(TIKWM_API, formData, { headers: formData.getHeaders() });
 
         if (response.data.code === 0) {
             const data = response.data.data;
@@ -84,6 +82,8 @@ async function processLink(request) {
             const normalUrl = BASE + data.play;
             const hdSize = Number(data.hd_size) || 0;
             const normalSize = Number(data.size) || 0;
+
+            console.log(`Size check - HD: ${hdSize} bytes, Normal: ${normalSize} bytes`);
 
             let finalUrl = null;
             let isHD = false;
@@ -99,10 +99,9 @@ async function processLink(request) {
             if (finalUrl) {
                 await saveAndSendVideo(request, normalUrl, finalUrl, isHD);
             } else {
-                // quá nặng → chỉ gửi link HD
                 await Request.findByIdAndUpdate(request._id, {status: 'completed'});
                 await bot.sendMessage(request.chatId.toString(), 
-                    `Video quá nặng (>45MB), xem link HD: ${hdUrl}\nGốc: ${request.originalLink}`);
+                    `Video quá nặng (>45MB)\nHD: ${hdUrl}\nGốc: ${request.originalLink}`);
                 await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
             }
         } else {
@@ -123,21 +122,21 @@ async function saveAndSendVideo(request, normalUrl, finalUrl, isHD) {
     });
     await video.save();
     await Request.findByIdAndUpdate(request._id, {status: 'completed'});
-    await sendVideoToTelegram(request, normalUrl, finalUrl, isHD);
+    await sendVideoToTelegram(request, finalUrl, isHD);
 }
 
-async function sendVideoToTelegram(request, normalUrl, finalUrl, isHD) {
+async function sendVideoToTelegram(request, finalUrl, isHD) {
     try {
-        await sendVideo(request, finalUrl, isHD);
+        await sendAsDocument(request, finalUrl, isHD); // Dùng Document để giữ chất lượng gốc, không bị Telegram nén mờ
     } catch (error) {
-        console.log('Send video failed, sending link');
+        console.log('Send failed, sending link');
         await bot.sendMessage(request.chatId.toString(), 
             `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
     }
 }
 
-async function sendVideo(request, videoUrl, isHD) {
-    await bot.sendVideo(request.chatId.toString(), videoUrl, {
+async function sendAsDocument(request, videoUrl, isHD) {
+    await bot.sendDocument(request.chatId.toString(), videoUrl, {
         reply_markup: {
             inline_keyboard: [[
                 {text: 'Xem link gốc', url: request.originalLink},
@@ -194,14 +193,17 @@ async function sendUserVideo(chatId, username, video) {
     const normalSize = Number(video.size) || 0;
 
     let finalUrl = null;
+    let isHD = false;
     if (hdSize > 0 && hdSize <= MAX_VIDEO_SIZE) {
         finalUrl = hdUrl;
+        isHD = true;
     } else if (normalSize > 0 && normalSize <= MAX_VIDEO_SIZE) {
         finalUrl = normalUrl;
+        isHD = false;
     }
 
     if (finalUrl) {
-        await bot.sendVideo(chatId, finalUrl, {
+        await bot.sendDocument(chatId, finalUrl, {
             reply_markup: {
                 inline_keyboard: [[
                     {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`}
@@ -260,4 +262,4 @@ function generateDashboardHTML(videos, requests) {
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started - HD + 45MB limit');
+console.log('Bot started - HD + 45MB + sendDocument (không mờ)');
