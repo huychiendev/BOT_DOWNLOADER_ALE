@@ -44,7 +44,7 @@ const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
 const BASE = 'https://www.tikwm.com';
-const MAX_VIDEO_SIZE = 45 * 1024 * 1024; // 45MB
+const MAX_VIDEO_SIZE = 45 * 1024 * 1024;
 
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
@@ -72,7 +72,7 @@ async function processLink(request) {
 
         const formData = new FormData();
         formData.append('url', request.originalLink);
-        formData.append('hd', '1');      // Bắt buộc HD
+        formData.append('hd', '1');
         formData.append('web', '1');
 
         const response = await axios.post(TIKWM_API, formData, { headers: formData.getHeaders() });
@@ -80,37 +80,38 @@ async function processLink(request) {
         if (response.data.code === 0) {
             const data = response.data.data;
 
-            // === LOG CHI TIẾT ĐỂ KIỂM TRA ===
-            console.log('[DEBUG] Video ID:', data.id);
-            console.log('[DEBUG] hdplay raw:', data.hdplay);
-            console.log('[DEBUG] play raw:', data.play);
-            console.log('[DEBUG] hd_size:', data.hd_size);
-            console.log('[DEBUG] size:', data.size);
+            // === CLEAN ESCAPED PATH (fix chính) ===
+            let hdPath = (data.hdplay || '').replace(/\\\//g, '/');
+            let normalPath = (data.play || '').replace(/\\\//g, '/');
 
-            // FORCE HDPLAY TRƯỚC TIÊN
+            console.log('[DEBUG] hdplay cleaned:', hdPath);
+            console.log('[DEBUG] play cleaned:', normalPath);
+            console.log('[DEBUG] hd_size:', data.hd_size);
+
             let finalUrl = null;
             let isHD = false;
 
-            if (data.hdplay && data.hdplay.trim() !== '') {
-                finalUrl = BASE + data.hdplay;
+            // FORCE HDPLAY
+            if (hdPath) {
+                finalUrl = BASE + hdPath;
                 isHD = true;
-                console.log('[DEBUG] → ĐÃ CHỌN HDPLAY (ưu tiên tuyệt đối)');
-            } else if (data.play && data.play.trim() !== '') {
-                finalUrl = BASE + data.play;
+                console.log('[DEBUG] → ĐÃ CHỌN HDPLAY');
+            } else if (normalPath) {
+                finalUrl = BASE + normalPath;
                 isHD = false;
-                console.log('[DEBUG] → Fallback sang PLAY (không có hdplay)');
+                console.log('[DEBUG] → Fallback PLAY');
             }
 
-            // Kiểm tra size chỉ để tránh vượt 45MB
+            // Kiểm tra size HD
             const hdSize = Number(data.hd_size) || 0;
             if (isHD && hdSize > MAX_VIDEO_SIZE) {
-                finalUrl = BASE + data.play;
+                finalUrl = BASE + normalPath;
                 isHD = false;
-                console.log('[DEBUG] → HD quá lớn, fallback sang PLAY');
+                console.log('[DEBUG] → HD quá lớn, fallback PLAY');
             }
 
             if (finalUrl) {
-                console.log('[DEBUG] Final URL gửi Telegram:', finalUrl);
+                console.log('[DEBUG] Final URL:', finalUrl);
                 await saveAndSendVideo(request, finalUrl, isHD);
             } else {
                 await handleError(request, 'Không tìm thấy link video');
@@ -147,9 +148,7 @@ async function sendVideoToTelegram(request, finalUrl, isHD) {
             }
         });
         await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
-        console.log('[DEBUG] Gửi document thành công');
     } catch (error) {
-        console.log('[DEBUG] Gửi thất bại → gửi link');
         await bot.sendMessage(request.chatId.toString(), 
             `Không gửi được video, xem link ${isHD ? 'HD' : 'thường'}: ${finalUrl}`);
     }
@@ -160,7 +159,7 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
-// ==================== USER VIDEOS (cũng force HDPLAY) ====================
+// User videos (cùng fix escaped path)
 async function processUserVideos(chatId, username) {
     try {
         const formData = new FormData();
@@ -193,12 +192,11 @@ async function processUserVideoList(chatId, username, videos) {
 }
 
 async function sendUserVideo(chatId, username, video) {
-    const hdUrl = video.hdplay && video.hdplay.trim() !== '' ? BASE + video.hdplay : null;
-    const normalUrl = BASE + video.play;
+    let hdPath = (video.hdplay || '').replace(/\\\//g, '/');
+    let normalPath = (video.play || '').replace(/\\\//g, '/');
+    let finalUrl = hdPath ? BASE + hdPath : BASE + normalPath;
     const hdSize = Number(video.hd_size) || 0;
-
-    let finalUrl = hdUrl || normalUrl;
-    if (hdUrl && hdSize > MAX_VIDEO_SIZE) finalUrl = normalUrl;
+    if (hdPath && hdSize > MAX_VIDEO_SIZE) finalUrl = BASE + normalPath;
 
     await bot.sendDocument(chatId, finalUrl, {
         reply_markup: {
@@ -209,7 +207,6 @@ async function sendUserVideo(chatId, username, video) {
     });
 }
 
-// ==================== BOT HANDLER ====================
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
@@ -256,4 +253,4 @@ function generateDashboardHTML(videos, requests) {
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started - FORCE HDPLAY + sendDocument + debug chi tiết');
+console.log('Bot started - FIXED escaped hdplay + FORCE HD');
