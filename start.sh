@@ -10,8 +10,8 @@ sleep 3
 # Xác thực bằng Auth Key nếu có
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
     echo "[INFO] Authenticating Tailscale with Auth Key..."
-    # Tự động kết nối và dùng lubu01 làm Exit Node
-    tailscale up --authkey="${TAILSCALE_AUTHKEY}" --hostname="render-bot-node" --exit-node=100.118.216.65 --accept-routes
+    # Tự động kết nối và dùng lubu01 làm Exit Node, chặn sửa DNS để tránh lỗi phân giải
+    tailscale up --authkey="${TAILSCALE_AUTHKEY}" --hostname="render-bot-node" --exit-node=100.118.216.65 --accept-routes --accept-dns=false
 else
     echo "[WARN] No TAILSCALE_AUTHKEY found in environment variables. Tailscale may not connect."
 fi
