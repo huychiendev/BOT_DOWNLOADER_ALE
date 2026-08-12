@@ -10,10 +10,10 @@ const {
     MONGODB_URI,
     BOT_TOKEN,
     TIKWM_API,
-    TIKWM_USER_API,
+    TIKWMAPI_BASE,
+    TIKWMAPI_KEY,
     PING_INTERVAL,
-    WEBHOOK_URL,
-    DEFAULT_VIDEO_LIMIT
+    WEBHOOK_URL
 } = process.env;
 
 const bot = new TelegramBot(BOT_TOKEN, {polling: true});
@@ -151,46 +151,64 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
-// User videos (force HD + clean path)
+// User videos via tikwmapi.com (API key auth + cursor pagination)
 async function processUserVideos(chatId, username) {
     try {
-        const formData = new FormData();
-        formData.append('unique_id', encodeURIComponent(username));
-        formData.append('count', DEFAULT_VIDEO_LIMIT);
-        formData.append('hd', '1');
-        formData.append('web', '1');
+        const statusMsg = await bot.sendMessage(chatId, `Đang tải video từ: ${username}...`);
+        const allVideos = [];
+        let cursor = 0;
+        let page = 1;
 
-        await bot.sendMessage(chatId, `Đang tải video từ: ${username}...`);
-        const response = await axios.post(TIKWM_USER_API, formData, { headers: formData.getHeaders() });
+        while (true) {
+            const { data } = await axios.get(`${TIKWMAPI_BASE}/user/posts`, {
+                headers: { 'x-tikwmapi-key': TIKWMAPI_KEY },
+                params: { unique_id: username, count: 30, cursor }
+            });
 
-        if (response.data.code === 0) {
-            await processUserVideoList(chatId, username, response.data.data.videos);
-        } else {
-            await bot.sendMessage(chatId, `Không tải được từ: ${username}`);
+            if (data.code !== 0 || !data.data?.videos?.length) break;
+
+            allVideos.push(...data.data.videos);
+            console.log(`[USER] ${username} - page ${page}, got ${data.data.videos.length}, total: ${allVideos.length}`);
+
+            if (!data.data.hasMore) break;
+            cursor = data.data.cursor;
+            page++;
         }
+
+        if (!allVideos.length) {
+            await bot.sendMessage(chatId, `Không tìm thấy video từ: ${username}`);
+            return;
+        }
+
+        await bot.editMessageText(`Tìm thấy ${allVideos.length} video. Đang gửi...`, {
+            chat_id: chatId, message_id: statusMsg.message_id
+        });
+
+        allVideos.reverse();
+        let sent = 0;
+        for (const video of allVideos) {
+            try {
+                await sendUserVideo(chatId, username, video);
+                sent++;
+            } catch (e) {
+                console.error(`[USER] Failed to send video ${video.video_id}:`, e.message);
+            }
+        }
+        await bot.sendMessage(chatId, `Đã gửi ${sent}/${allVideos.length} video từ: ${username}`);
     } catch (error) {
-        console.error('User videos error:', error);
+        console.error('User videos error:', error.message);
         await bot.sendMessage(chatId, `Lỗi tải video từ: ${username}`);
     }
 }
 
-async function processUserVideoList(chatId, username, videos) {
-    await bot.sendMessage(chatId, `Tìm thấy ${videos.length} video. Đang xử lý...`);
-    videos.reverse();
-    for (let video of videos) {
-        try { await sendUserVideo(chatId, username, video); } catch (e) {}
-    }
-    await bot.sendMessage(chatId, `Đã gửi xong từ: ${username}`);
-}
-
 async function sendUserVideo(chatId, username, video) {
-    let hdPath = (video.hdplay || '').replace(/\\\//g, '/');
-    let finalUrl = hdPath ? BASE + hdPath : BASE + (video.play || '').replace(/\\\//g, '/');
+    const finalUrl = video.play;
+    if (!finalUrl) return;
     await bot.sendDocument(chatId, finalUrl, {
         reply_markup: {
             inline_keyboard: [[
                 {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`},
-                {text: 'Link HD', url: finalUrl}
+                {text: 'Link video', url: finalUrl}
             ]]
         }
     });
