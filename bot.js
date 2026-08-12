@@ -1,25 +1,51 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const FormData = require('form-data');
 const express = require('express');
 const mongoose = require('mongoose');
+
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
 
 const {
     PORT,
     MONGODB_URI,
     BOT_TOKEN,
+    PING_INTERVAL,
+    WEBHOOK_URL,
     TIKWMAPI_BASE,
     TIKWMAPI_KEY,
-    PING_INTERVAL,
-    WEBHOOK_URL
+    CF_CLEARANCE
 } = process.env;
 
-const tikwmApi = axios.create({
-    baseURL: TIKWMAPI_BASE,
-    headers: { 'x-tikwmapi-key': TIKWMAPI_KEY }
+const TIKWM_BASE = 'https://www.tikwm.com';
+const TIKWM_FREE_API = 'https://www.tikwm.com/api/';
+const TIKWM_FREE_USER_API = 'https://www.tikwm.com/api/user/posts';
+const MAX_TELEGRAM_FILE = 45 * 1024 * 1024;
+const MAX_PAGES = 200;
+
+const tikwmPaidApi = axios.create({
+    baseURL: TIKWMAPI_BASE || 'https://api.tikwmapi.com',
+    headers: TIKWMAPI_KEY ? { 'x-tikwmapi-key': TIKWMAPI_KEY } : {}
 });
 
-const bot = new TelegramBot(BOT_TOKEN, {polling: true});
+const bot = new TelegramBot(BOT_TOKEN, {
+    polling: {
+        autoStart: true,
+        params: { timeout: 10 }
+    }
+});
+
+bot.on('polling_error', (error) => {
+    console.error('[POLLING_ERROR]', error.code || error.message);
+    if (error.code === 'EFATAL') {
+        setTimeout(() => {
+            bot.stopPolling().then(() => bot.startPolling()).catch(() => { });
+        }, 5000);
+    }
+});
+
 const app = express();
 const userQueues = {};
 
@@ -30,29 +56,28 @@ const videoSchema = new mongoose.Schema({
     userHandle: String,
     originalLink: String,
     processedLink: String,
-    timestamp: {type: Date, default: Date.now}
+    timestamp: { type: Date, default: Date.now }
 });
+
 const requestSchema = new mongoose.Schema({
     userName: String,
     userHandle: String,
     chatId: String,
     messageId: String,
     originalLink: String,
-    status: {type: String, enum: ['pending', 'downloading', 'completed', 'error'], default: 'pending'},
+    status: { type: String, enum: ['pending', 'downloading', 'completed', 'error'], default: 'pending' },
     errorMessage: String,
-    timestamp: {type: Date, default: Date.now}
+    timestamp: { type: Date, default: Date.now }
 });
 
 const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
-const MAX_TELEGRAM_FILE = 45 * 1024 * 1024;
-
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
     try {
-        const videos = await Video.find().sort({timestamp: -1}).limit(100);
-        const requests = await Request.find().sort({timestamp: -1}).limit(100);
+        const videos = await Video.find().sort({ timestamp: -1 }).limit(100);
+        const requests = await Request.find().sort({ timestamp: -1 }).limit(100);
         res.send(generateDashboardHTML(videos, requests));
     } catch (error) {
         res.status(500).send('Error fetching download history');
@@ -68,33 +93,93 @@ async function processQueue(chatId) {
     }
 }
 
-async function processLink(request) {
-    try {
-        await Request.findByIdAndUpdate(request._id, {status: 'downloading'});
+async function getVideoStream(url) {
+    const { data } = await axios.get(url, {
+        responseType: 'stream',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Referer': 'https://www.tiktok.com/'
+        }
+    });
+    return data;
+}
 
-        const { data: response } = await tikwmApi.get('/', {
-            params: { url: request.originalLink, hd: 1 }
+// Fetch single video with 2-tier fallback: Free TikWM API -> Paid TikWM API Key
+async function fetchVideoData(originalLink) {
+    // Tier 1: Free direct API
+    try {
+        const formData = new FormData();
+        formData.append('url', originalLink);
+        formData.append('hd', '1');
+        formData.append('web', '1');
+
+        const { data: response } = await axios.post(TIKWM_FREE_API, formData, {
+            headers: {
+                ...formData.getHeaders(),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Referer': 'https://www.tikwm.com/'
+            }
         });
 
-        if (response.code !== 0 || !response.data) {
-            await handleError(request, response.msg || 'API error');
+        if (response.code === 0 && response.data) {
+            return { data: response.data, source: 'FREE' };
+        }
+    } catch (e) {
+        console.log('[SINGLE_VIDEO] Free API failed, trying paid fallback:', e.message);
+    }
+
+    // Tier 2: Paid API Key Fallback
+    if (TIKWMAPI_KEY) {
+        try {
+            const { data: response } = await tikwmPaidApi.get('/', {
+                params: { url: originalLink, hd: 1 }
+            });
+            if (response.code === 0 && response.data) {
+                return { data: response.data, source: 'PAID' };
+            }
+        } catch (e) {
+            console.error('[SINGLE_VIDEO] Paid API failed:', e.message);
+        }
+    }
+
+    return null;
+}
+
+async function processLink(request) {
+    try {
+        await Request.findByIdAndUpdate(request._id, { status: 'downloading' });
+
+        const result = await fetchVideoData(request.originalLink);
+        if (!result) {
+            await handleError(request, 'Khong the lay du lieu video tu server');
             return;
         }
 
-        const { hdplay, play, hd_size } = response.data;
-        let finalUrl = hdplay || play;
-        let isHD = !!hdplay;
+        const { data } = result;
+        let hdPath = (data.hdplay || '').replace(/\\\//g, '/');
+        let normalPath = (data.play || '').replace(/\\\//g, '/');
 
-        // Fallback to normal if HD exceeds Telegram limit
-        if (isHD && Number(hd_size) > MAX_TELEGRAM_FILE && play) {
-            finalUrl = play;
+        let finalUrl = null;
+        let isHD = false;
+
+        if (hdPath) {
+            finalUrl = hdPath.startsWith('http') ? hdPath : TIKWM_BASE + hdPath;
+            isHD = true;
+        } else if (normalPath) {
+            finalUrl = normalPath.startsWith('http') ? normalPath : TIKWM_BASE + normalPath;
+            isHD = false;
+        }
+
+        const hdSize = Number(data.hd_size) || 0;
+        if (isHD && hdSize > MAX_TELEGRAM_FILE && normalPath) {
+            finalUrl = normalPath.startsWith('http') ? normalPath : TIKWM_BASE + normalPath;
             isHD = false;
         }
 
         if (finalUrl) {
-            await saveAndSendVideo(request, finalUrl, isHD);
+            await saveAndSendVideo(request, finalUrl, isHD, data.title);
         } else {
-            await handleError(request, 'Không tìm thấy link video');
+            await handleError(request, 'Khong tim thay link video phu hop');
         }
     } catch (error) {
         console.error('Error:', error.message);
@@ -102,7 +187,7 @@ async function processLink(request) {
     }
 }
 
-async function saveAndSendVideo(request, finalUrl, isHD) {
+async function saveAndSendVideo(request, finalUrl, isHD, title) {
     const video = new Video({
         userName: request.userName,
         userHandle: request.userHandle,
@@ -110,70 +195,120 @@ async function saveAndSendVideo(request, finalUrl, isHD) {
         processedLink: finalUrl
     });
     await video.save();
-    await Request.findByIdAndUpdate(request._id, {status: 'completed'});
-    await sendVideoToTelegram(request, finalUrl, isHD);
+    await Request.findByIdAndUpdate(request._id, { status: 'completed' });
+    await sendVideoToTelegram(request, finalUrl, isHD, title);
 }
 
-async function sendVideoToTelegram(request, finalUrl, isHD) {
+async function sendVideoToTelegram(request, finalUrl, isHD, title) {
+    const captionText = title ? `[VIDEO] ${title.substring(0, 950)}` : '';
+    const keyboard = {
+        inline_keyboard: [[
+            { text: 'Xem link goc', url: request.originalLink },
+            { text: isHD ? 'Link HD' : 'Link Video', url: finalUrl }
+        ]]
+    };
+
     try {
-        await bot.sendDocument(request.chatId.toString(), finalUrl, {
-            reply_markup: {
-                inline_keyboard: [[
-                    {text: 'Xem link gốc', url: request.originalLink},
-                    {text: `Link HD`, url: finalUrl}
-                ]]
-            }
-        });
-        await bot.deleteMessage(request.chatId.toString(), request.messageId.toString());
+        console.log(`[STREAMING VIDEO] ${request.originalLink} -> ${isHD ? 'HD' : 'Normal'}`);
+        const stream = await getVideoStream(finalUrl);
+        await bot.sendVideo(request.chatId.toString(), stream, {
+            caption: captionText,
+            reply_markup: keyboard
+        }, { filename: 'video.mp4', contentType: 'video/mp4' });
+        console.log(`[SENT VIDEO SUCCESS] ${request.originalLink}`);
     } catch (error) {
-        await bot.sendMessage(request.chatId.toString(), 
-            `Video HD: ${finalUrl}\nGốc: ${request.originalLink}`);
+        console.error('[SEND_VIDEO_FALLBACK]', error.message);
+        try {
+            await bot.sendMessage(request.chatId.toString(), `${captionText}\n\n[Link HD] (${finalUrl})\n[Link Goc]: ${request.originalLink}`, {
+                reply_markup: keyboard
+            });
+        } catch (e) { }
     }
 }
 
 async function handleError(request, errorMessage) {
-    await Request.findByIdAndUpdate(request._id, {status: 'error', errorMessage});
-    await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
+    await Request.findByIdAndUpdate(request._id, { status: 'error', errorMessage });
+    await bot.sendMessage(request.chatId.toString(), `Co loi khi xu ly link: ${request.originalLink}`);
 }
 
-const MAX_PAGES = 200; // Safe guard: 200 pages x 30 = 6000 videos max
-const delay = ms => new Promise(r => setTimeout(r, ms));
-
-// User videos via tikwmapi.com (API key auth + cursor pagination)
+// Fetch user channel posts with 2-tier fallback: Free API -> Paid API Key
 async function processUserVideos(chatId, username) {
     try {
-        const statusMsg = await bot.sendMessage(chatId, `Đang tải video từ: ${username}...`);
-        const allVideos = [];
+        const statusMsg = await bot.sendMessage(chatId, `Dang tai video tu kenh: ${username}...`);
+        let allVideos = [];
+        let usePaidFallback = false;
         let cursor = 0;
 
+        // Tier 1: Try Free User API
         for (let page = 1; page <= MAX_PAGES; page++) {
-            const { data, headers } = await tikwmApi.get('/user/posts', {
-                params: { unique_id: username, count: 30, cursor }
-            });
+            const formData = new FormData();
+            formData.append('unique_id', username);
+            formData.append('count', '30');
+            formData.append('cursor', cursor.toString());
+            formData.append('hd', '1');
+            formData.append('web', '1');
 
-            if (data.code !== 0 || !data.data?.videos?.length) break;
+            const headers = {
+                ...formData.getHeaders(),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Referer': 'https://www.tikwm.com/',
+                'Origin': 'https://www.tikwm.com'
+            };
+            if (CF_CLEARANCE) {
+                headers['Cookie'] = `cf_clearance=${CF_CLEARANCE}`;
+            }
 
-            allVideos.push(...data.data.videos);
-            console.log(`[USER] ${username} - page ${page}, got ${data.data.videos.length}, total: ${allVideos.length}`);
+            try {
+                const { data: pageData } = await axios.post(TIKWM_FREE_USER_API, formData, { headers });
 
-            if (!data.data.hasMore) break;
-            cursor = data.data.cursor;
+                if (typeof pageData === 'string' && pageData.includes('Just a moment')) {
+                    console.log('[USER_POSTS] Cloudflare blocked free API, switching to paid fallback');
+                    usePaidFallback = true;
+                    break;
+                }
 
-            // Respect rate limit
-            const remaining = Number(headers['x-ratelimit-remaining']);
-            if (remaining !== undefined && remaining < 10) {
-                const resetSec = Number(headers['x-ratelimit-reset']) || 60;
-                console.log(`[USER] Rate limit low (${remaining}), waiting ${resetSec}s`);
-                await delay(resetSec * 1000);
+                if (!pageData || pageData.code !== 0 || !pageData.data?.videos?.length) break;
+
+                allVideos.push(...pageData.data.videos);
+                if (!pageData.data.hasMore) break;
+                cursor = pageData.data.cursor;
+            } catch (e) {
+                console.log('[USER_POSTS] Free API error, switching to paid fallback:', e.message);
+                usePaidFallback = true;
+                break;
+            }
+        }
+
+        // Tier 2: Paid API Key Fallback if Tier 1 blocked/failed
+        if (usePaidFallback && TIKWMAPI_KEY) {
+            console.log('[USER_POSTS] Running Tier 2 Paid API Fallback...');
+            allVideos = [];
+            cursor = 0;
+
+            for (let page = 1; page <= MAX_PAGES; page++) {
+                try {
+                    const { data: pageData } = await tikwmPaidApi.get('/user/posts', {
+                        params: { unique_id: username, count: 30, cursor }
+                    });
+
+                    if (!pageData || pageData.code !== 0 || !pageData.data?.videos?.length) break;
+
+                    allVideos.push(...pageData.data.videos);
+                    if (!pageData.data.hasMore) break;
+                    cursor = pageData.data.cursor;
+                } catch (e) {
+                    console.error('[USER_POSTS_PAID_ERR]', e.message);
+                    break;
+                }
             }
         }
 
         if (!allVideos.length) {
-            await bot.sendMessage(chatId, `Không tìm thấy video từ: ${username}`);
+            await bot.sendMessage(chatId, `Khong tim thay video tu kenh: ${username}`);
             return;
         }
 
-        await bot.editMessageText(`Tìm thấy ${allVideos.length} video. Đang gửi...`, {
+        await bot.editMessageText(`Tim thay ${allVideos.length} video. Dang gui...`, {
             chat_id: chatId, message_id: statusMsg.message_id
         });
 
@@ -187,29 +322,46 @@ async function processUserVideos(chatId, username) {
                 console.error(`[USER] Failed to send video ${video.video_id}:`, e.message);
             }
         }
-        await bot.sendMessage(chatId, `Đã gửi ${sent}/${allVideos.length} video từ: ${username}`);
+        await bot.sendMessage(chatId, `Da gui xong ${sent}/${allVideos.length} video tu kenh: ${username}`);
     } catch (error) {
         console.error('User videos error:', error.message);
-        await bot.sendMessage(chatId, `Lỗi tải video từ: ${username}`);
+        await bot.sendMessage(chatId, `Loi khi tai video tu kenh: ${username}`);
     }
 }
 
 async function sendUserVideo(chatId, username, video) {
-    const finalUrl = video.play;
+    let hdPath = (video.hdplay || '').replace(/\\\//g, '/');
+    let normalPath = (video.play || '').replace(/\\\//g, '/');
+    let finalUrl = hdPath ? (hdPath.startsWith('http') ? hdPath : TIKWM_BASE + hdPath) : (normalPath.startsWith('http') ? normalPath : TIKWM_BASE + normalPath);
     if (!finalUrl) return;
-    await bot.sendDocument(chatId, finalUrl, {
-        reply_markup: {
-            inline_keyboard: [[
-                {text: 'Xem link gốc', url: `https://www.tiktok.com/@${username}/video/${video.video_id}`},
-                {text: 'Link video', url: finalUrl}
-            ]]
-        }
-    });
+
+    const title = video.title || `Video tu ${username}`;
+    const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
+    const keyboard = {
+        inline_keyboard: [[
+            { text: 'Xem link goc', url: originalLink },
+            { text: 'Link Video', url: finalUrl }
+        ]]
+    };
+
+    try {
+        const stream = await getVideoStream(finalUrl);
+        await bot.sendVideo(chatId, stream, {
+            caption: `[VIDEO] ${title.substring(0, 950)}`,
+            reply_markup: keyboard
+        }, { filename: 'video.mp4', contentType: 'video/mp4' });
+    } catch (e) {
+        console.error(`[USER_VIDEO_FALLBACK] ${video.video_id}:`, e.message);
+        await bot.sendMessage(chatId, `[VIDEO] ${title.substring(0, 500)}\n\nLink Tai: ${finalUrl}\nLink Goc: ${originalLink}`, {
+            reply_markup: keyboard
+        });
+    }
 }
 
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
+    console.log(`[BOT MSG] ChatID: ${chatId} | Text: ${text}`);
     if (!text) return;
 
     const usernameMatch = text.match(/^u:(.+)$/);
@@ -218,39 +370,39 @@ bot.on('message', async (msg) => {
         return;
     }
 
-    const links = text.match(/https?:\/\/(?:www\.|vt\.)?tiktok\.com\/\S+/g);
+    const links = text.match(/https?:\/\/(?:www\.|vt\.|v\.)?(tiktok|douyin)\.com\/\S+/g);
     if (links?.length) {
         await handleTiktokLinks(chatId, msg, links);
     } else {
-        await bot.sendMessage(chatId, 'Vui lòng gửi link TikTok.');
+        await bot.sendMessage(chatId, 'Vui long gui link TikTok hop le hoac lenh u:username');
     }
 });
 
 async function handleTiktokLinks(chatId, msg, links) {
-    const processingMsg = await bot.sendMessage(chatId, `Đã thêm ${links.length} video vào queue...`);
+    const processingMsg = await bot.sendMessage(chatId, `Da them ${links.length} video vao hang doi...`);
     userQueues[chatId] = userQueues[chatId] || [];
     const userName = msg.from.first_name + (msg.from.last_name ? ' ' + msg.from.last_name : '');
     const userHandle = msg.from.username || 'N/A';
 
     for (const link of links) {
-        const req = new Request({ 
-            userName, userHandle, 
-            chatId: chatId.toString(), 
-            messageId: msg.message_id.toString(), 
-            originalLink: link 
+        const req = new Request({
+            userName, userHandle,
+            chatId: chatId.toString(),
+            messageId: msg.message_id.toString(),
+            originalLink: link
         });
         await req.save();
         userQueues[chatId].push(req);
     }
     if (userQueues[chatId].length === links.length) processQueue(chatId);
 
-    setTimeout(() => bot.deleteMessage(chatId, processingMsg.message_id).catch(()=>{}), 5000);
+    setTimeout(() => bot.deleteMessage(chatId, processingMsg.message_id).catch(() => { }), 5000);
 }
 
 function generateDashboardHTML(videos, requests) {
-    return `<html><head><title>TikTok Dashboard</title><style>body{font-family:Arial;margin:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}</style></head><body><h1>TikTok Download Dashboard</h1><h2>Requests</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Status</th><th>Time</th></tr>${requests.map(r=>`<tr><td>${r.userName}</td><td>${r.userHandle}</td><td><a href="${r.originalLink}">link</a></td><td>${r.status}</td><td>${r.timestamp.toLocaleString()}</td></tr>`).join('')}</table><h2>Completed</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Processed</th><th>Time</th></tr>${videos.map(v=>`<tr><td>${v.userName}</td><td>${v.userHandle}</td><td><a href="${v.originalLink}">link</a></td><td><a href="${v.processedLink}">link</a></td><td>${v.timestamp.toLocaleString()}</td></tr>`).join('')}</table></body></html>`;
+    return `<html><head><title>TikTok Dashboard</title><style>body{font-family:Arial;margin:20px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px}</style></head><body><h1>TikTok Download Dashboard</h1><h2>Requests</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Status</th><th>Time</th></tr>${requests.map(r => `<tr><td>${r.userName}</td><td>${r.userHandle}</td><td><a href="${r.originalLink}">link</a></td><td>${r.status}</td><td>${r.timestamp.toLocaleString()}</td></tr>`).join('')}</table><h2>Completed</h2><table><tr><th>User</th><th>Handle</th><th>Original</th><th>Processed</th><th>Time</th></tr>${videos.map(v => `<tr><td>${v.userName}</td><td>${v.userHandle}</td><td><a href="${v.originalLink}">link</a></td><td><a href="${v.processedLink}">link</a></td><td>${v.timestamp.toLocaleString()}</td></tr>`).join('')}</table></body></html>`;
 }
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
-setInterval(() => axios.get(WEBHOOK_URL).catch(()=>{}), PING_INTERVAL);
-console.log('Bot started - FORCE HDPLAY + clean path + gửi link HD trực tiếp');
+setInterval(() => axios.get(WEBHOOK_URL).catch(() => { }), PING_INTERVAL);
+console.log('Bot started - Clean Standalone Engine with Multi-Tier Fallback');
