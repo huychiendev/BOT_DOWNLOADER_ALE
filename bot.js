@@ -59,7 +59,7 @@ const bot = new TelegramBot(BOT_TOKEN, {
 });
 
 bot.on('polling_error', (error) => {
-    console.error('[POLLING_ERROR]', error.code || error.message);
+    console.error('[POLLING_ERROR]', error.message);
     if (error.code === 'EFATAL') {
         setTimeout(() => {
             bot.stopPolling().then(() => bot.startPolling()).catch(() => { });
