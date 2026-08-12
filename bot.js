@@ -1,4 +1,5 @@
 require('dotenv').config();
+process.env.NTBA_FIX_350 = 1;
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const FormData = require('form-data');
@@ -177,6 +178,7 @@ async function processLink(request) {
             return;
         }
 
+        console.log(`[PROCESS_LINK] URL: ${request.originalLink} | API_TIER: ${result.source}`);
         const { data } = result;
         let hdPath = (data.hdplay || '').replace(/\\\//g, '/');
         let normalPath = (data.play || '').replace(/\\\//g, '/');
@@ -222,7 +224,7 @@ async function saveAndSendVideo(request, finalUrl, isHD, title) {
 }
 
 async function sendVideoToTelegram(request, finalUrl, isHD, title) {
-    const captionText = title ? title.substring(0, 1000) : '';
+    const captionText = ''; // Tắt caption theo yêu cầu
     const keyboard = {
         inline_keyboard: [[
             { text: 'Xem link goc', url: request.originalLink },
@@ -262,6 +264,7 @@ async function processUserVideos(chatId, username) {
         let cursor = 0;
 
         // Tier 1: Try Free User API
+        console.log(`[PROCESS_USER] Kenh: ${username} | Thu nghiem API_TIER: FREE (Goi TikWM API truc tiep)`);
         for (let page = 1; page <= MAX_PAGES; page++) {
             const formData = new FormData();
             formData.append('unique_id', username);
@@ -303,6 +306,7 @@ async function processUserVideos(chatId, username) {
 
         // Tier 2: Paid API Key Fallback if Tier 1 blocked/failed
         if (usePaidFallback && TIKWMAPI_KEY) {
+            console.log(`[PROCESS_USER] Kenh: ${username} | Chuyen qua API_TIER: PAID (TikWM Paid API)`);
             console.log('[USER_POSTS] Running Tier 2 Paid API Fallback...');
             allVideos = [];
             cursor = 0;
@@ -358,7 +362,7 @@ async function sendUserVideo(chatId, username, video) {
     if (!finalUrl) return;
 
     const title = video.title || '';
-    const captionText = title ? title.substring(0, 1000) : '';
+    const captionText = ''; // Tắt caption theo yêu cầu
     const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
     const keyboard = {
         inline_keyboard: [[
