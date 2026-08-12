@@ -240,6 +240,11 @@ async function sendVideoToTelegram(request, finalUrl, isHD, title) {
             reply_markup: keyboard
         }, { filename: 'video.mp4', contentType: 'video/mp4' });
         console.log(`[SENT VIDEO SUCCESS] ${request.originalLink}`);
+        
+        // Xóa tin nhắn gốc chứa link của người dùng để gọn khung chat
+        if (request.messageId) {
+            bot.deleteMessage(request.chatId.toString(), request.messageId).catch(() => {});
+        }
     } catch (error) {
         console.error('[SEND_VIDEO_FALLBACK]', error.message);
         try {
