@@ -18,7 +18,8 @@ const {
     TIKWMAPI_BASE,
     TIKWMAPI_KEY,
     CF_CLEARANCE,
-    PROXY_URL
+    PROXY_URL,
+    API_ENDPOINT
 } = process.env;
 
 let axiosProxy = false;
@@ -127,7 +128,51 @@ async function getVideoStream(url) {
 }
 
 // Fetch single video with 2-tier fallback: Free TikWM API -> Paid TikWM API Key
+async function fetchDouyinVideoData(originalLink) {
+    if (!API_ENDPOINT) {
+        console.error('[SINGLE_VIDEO_DOUYIN] Missing API_ENDPOINT in .env');
+        return null;
+    }
+    try {
+        const response = await axios.get(`${API_ENDPOINT}?url=${encodeURIComponent(originalLink)}`);
+        if (response.status === 200 && response.data.code === 200) {
+            const videoData = response.data;
+            let videoUrl, hdVideoUrl;
+            const title = videoData.data?.desc || videoData.data?.aweme_detail?.desc || '';
+
+            if (videoData.data?.video?.play_addr?.url_list) {
+                videoUrl = videoData.data.video.play_addr.url_list[0];
+                hdVideoUrl = videoData.data.video.hd_play_addr?.url_list?.[0];
+            } else if (videoData.data?.aweme_detail?.video?.play_addr?.url_list) {
+                videoUrl = videoData.data.aweme_detail.video.play_addr.url_list[0];
+                hdVideoUrl = videoData.data.aweme_detail.video.hd_play_addr?.url_list?.[0];
+            } else if (videoData.data?.play_addr?.url_list) {
+                videoUrl = videoData.data.play_addr.url_list[0];
+                hdVideoUrl = videoData.data.hd_play_addr?.url_list?.[0];
+            } else {
+                return null;
+            }
+
+            return {
+                data: {
+                    play: videoUrl,
+                    hdplay: hdVideoUrl || videoUrl,
+                    title: title
+                },
+                source: 'DOUYIN_LOCAL_API'
+            };
+        }
+    } catch (e) {
+        console.error('[SINGLE_VIDEO_DOUYIN] API failed:', e.message);
+    }
+    return null;
+}
+
 async function fetchVideoData(originalLink) {
+    if (originalLink.includes('douyin.com')) {
+        return fetchDouyinVideoData(originalLink);
+    }
+
     // Tier 1: Free direct API
     try {
         const formData = new FormData();

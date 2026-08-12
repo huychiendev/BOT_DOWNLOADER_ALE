@@ -16,8 +16,14 @@ else
     echo "[WARN] No TAILSCALE_AUTHKEY found in environment variables. Tailscale may not connect."
 fi
 
+# Chạy ứng dụng Python Douyin API ngầm
+echo "[INFO] Starting Douyin API..."
+cd /app
+python3 start.py &
+
 # Chạy ứng dụng Node.js Bot
 echo "[INFO] Starting Node.js Bot..."
+cd /bot
 # Tự động ép tất cả traffic của Bot đi qua Tailscale daemon
 export PROXY_URL=http://localhost:1055
 exec node bot.js
