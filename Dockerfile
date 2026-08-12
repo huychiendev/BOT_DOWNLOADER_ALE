@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
-# Cài đặt Tailscale và iptables (cần thiết cho tun=userspace-networking nếu có fallback)
-RUN apk update && apk add --no-cache curl iptables tailscale
+# Cài đặt Tailscale (Không cài iptables để tránh Tailscale hijack traffic của Telegram)
+RUN apk update && apk add --no-cache curl tailscale
 
 # Tạo thư mục cho Tailscale socket & state
 RUN mkdir -p /var/run/tailscale /var/cache/tailscale /var/lib/tailscale
