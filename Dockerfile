@@ -1,8 +1,7 @@
 FROM node:20-alpine
 
 # Cài đặt Tailscale và iptables (cần thiết cho tun=userspace-networking nếu có fallback)
-RUN apk update && apk add --no-cache curl iptables \
-    && curl -fsSL https://tailscale.com/install.sh | sh
+RUN apk update && apk add --no-cache curl iptables tailscale
 
 # Tạo thư mục cho Tailscale socket & state
 RUN mkdir -p /var/run/tailscale /var/cache/tailscale /var/lib/tailscale
