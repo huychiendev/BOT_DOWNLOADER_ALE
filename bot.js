@@ -1,7 +1,6 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const FormData = require('form-data');
 const express = require('express');
 const mongoose = require('mongoose');
 
@@ -9,12 +8,16 @@ const {
     PORT,
     MONGODB_URI,
     BOT_TOKEN,
-    TIKWM_API,
     TIKWMAPI_BASE,
     TIKWMAPI_KEY,
     PING_INTERVAL,
     WEBHOOK_URL
 } = process.env;
+
+const tikwmApi = axios.create({
+    baseURL: TIKWMAPI_BASE,
+    headers: { 'x-tikwmapi-key': TIKWMAPI_KEY }
+});
 
 const bot = new TelegramBot(BOT_TOKEN, {polling: true});
 const app = express();
@@ -43,8 +46,7 @@ const requestSchema = new mongoose.Schema({
 const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
-const BASE = 'https://www.tikwm.com';
-const MAX_VIDEO_SIZE = 45 * 1024 * 1024;
+const MAX_TELEGRAM_FILE = 45 * 1024 * 1024;
 
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
@@ -62,7 +64,7 @@ async function processQueue(chatId) {
         const request = userQueues[chatId][0];
         await processLink(request);
         userQueues[chatId].shift();
-        processQueue(chatId);
+        await processQueue(chatId);
     }
 }
 
@@ -70,49 +72,32 @@ async function processLink(request) {
     try {
         await Request.findByIdAndUpdate(request._id, {status: 'downloading'});
 
-        const formData = new FormData();
-        formData.append('url', request.originalLink);
-        formData.append('hd', '1');
-        formData.append('web', '1');
+        const { data: response } = await tikwmApi.get('/', {
+            params: { url: request.originalLink, hd: 1 }
+        });
 
-        const response = await axios.post(TIKWM_API, formData, { headers: formData.getHeaders() });
+        if (response.code !== 0 || !response.data) {
+            await handleError(request, response.msg || 'API error');
+            return;
+        }
 
-        if (response.data.code === 0) {
-            const data = response.data.data;
+        const { hdplay, play, hd_size } = response.data;
+        let finalUrl = hdplay || play;
+        let isHD = !!hdplay;
 
-            let hdPath = (data.hdplay || '').replace(/\\\//g, '/');
-            let normalPath = (data.play || '').replace(/\\\//g, '/');
+        // Fallback to normal if HD exceeds Telegram limit
+        if (isHD && Number(hd_size) > MAX_TELEGRAM_FILE && play) {
+            finalUrl = play;
+            isHD = false;
+        }
 
-            console.log('[DEBUG] hdplay cleaned:', hdPath);
-            console.log('[DEBUG] hd_size:', data.hd_size);
-
-            let finalUrl = null;
-            let isHD = false;
-
-            if (hdPath) {
-                finalUrl = BASE + hdPath;
-                isHD = true;
-            } else if (normalPath) {
-                finalUrl = BASE + normalPath;
-                isHD = false;
-            }
-
-            const hdSize = Number(data.hd_size) || 0;
-            if (isHD && hdSize > MAX_VIDEO_SIZE) {
-                finalUrl = BASE + normalPath;
-                isHD = false;
-            }
-
-            if (finalUrl) {
-                await saveAndSendVideo(request, finalUrl, isHD);
-            } else {
-                await handleError(request, 'Không tìm thấy link');
-            }
+        if (finalUrl) {
+            await saveAndSendVideo(request, finalUrl, isHD);
         } else {
-            await handleError(request, 'API error');
+            await handleError(request, 'Không tìm thấy link video');
         }
     } catch (error) {
-        console.error('Error:', error);
+        console.error('Error:', error.message);
         await handleError(request, error.message);
     }
 }
@@ -151,17 +136,18 @@ async function handleError(request, errorMessage) {
     await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
+const MAX_PAGES = 200; // Safe guard: 200 pages x 30 = 6000 videos max
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
 // User videos via tikwmapi.com (API key auth + cursor pagination)
 async function processUserVideos(chatId, username) {
     try {
         const statusMsg = await bot.sendMessage(chatId, `Đang tải video từ: ${username}...`);
         const allVideos = [];
         let cursor = 0;
-        let page = 1;
 
-        while (true) {
-            const { data } = await axios.get(`${TIKWMAPI_BASE}/user/posts`, {
-                headers: { 'x-tikwmapi-key': TIKWMAPI_KEY },
+        for (let page = 1; page <= MAX_PAGES; page++) {
+            const { data, headers } = await tikwmApi.get('/user/posts', {
                 params: { unique_id: username, count: 30, cursor }
             });
 
@@ -172,7 +158,14 @@ async function processUserVideos(chatId, username) {
 
             if (!data.data.hasMore) break;
             cursor = data.data.cursor;
-            page++;
+
+            // Respect rate limit
+            const remaining = Number(headers['x-ratelimit-remaining']);
+            if (remaining !== undefined && remaining < 10) {
+                const resetSec = Number(headers['x-ratelimit-reset']) || 60;
+                console.log(`[USER] Rate limit low (${remaining}), waiting ${resetSec}s`);
+                await delay(resetSec * 1000);
+            }
         }
 
         if (!allVideos.length) {
