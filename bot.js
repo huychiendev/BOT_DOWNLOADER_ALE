@@ -200,7 +200,7 @@ async function saveAndSendVideo(request, finalUrl, isHD, title) {
 }
 
 async function sendVideoToTelegram(request, finalUrl, isHD, title) {
-    const captionText = title ? `[VIDEO] ${title.substring(0, 950)}` : '';
+    const captionText = title ? title.substring(0, 1000) : '';
     const keyboard = {
         inline_keyboard: [[
             { text: 'Xem link goc', url: request.originalLink },
@@ -219,7 +219,7 @@ async function sendVideoToTelegram(request, finalUrl, isHD, title) {
     } catch (error) {
         console.error('[SEND_VIDEO_FALLBACK]', error.message);
         try {
-            await bot.sendMessage(request.chatId.toString(), `${captionText}\n\n[Link HD] (${finalUrl})\n[Link Goc]: ${request.originalLink}`, {
+            await bot.sendMessage(request.chatId.toString(), captionText ? `${captionText}\n\nLink HD: ${finalUrl}` : `Link HD: ${finalUrl}`, {
                 reply_markup: keyboard
             });
         } catch (e) { }
@@ -335,7 +335,8 @@ async function sendUserVideo(chatId, username, video) {
     let finalUrl = hdPath ? (hdPath.startsWith('http') ? hdPath : TIKWM_BASE + hdPath) : (normalPath.startsWith('http') ? normalPath : TIKWM_BASE + normalPath);
     if (!finalUrl) return;
 
-    const title = video.title || `Video tu ${username}`;
+    const title = video.title || '';
+    const captionText = title ? title.substring(0, 1000) : '';
     const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
     const keyboard = {
         inline_keyboard: [[
@@ -347,12 +348,12 @@ async function sendUserVideo(chatId, username, video) {
     try {
         const stream = await getVideoStream(finalUrl);
         await bot.sendVideo(chatId, stream, {
-            caption: `[VIDEO] ${title.substring(0, 950)}`,
+            caption: captionText,
             reply_markup: keyboard
         }, { filename: 'video.mp4', contentType: 'video/mp4' });
     } catch (e) {
         console.error(`[USER_VIDEO_FALLBACK] ${video.video_id}:`, e.message);
-        await bot.sendMessage(chatId, `[VIDEO] ${title.substring(0, 500)}\n\nLink Tai: ${finalUrl}\nLink Goc: ${originalLink}`, {
+        await bot.sendMessage(chatId, captionText ? `${captionText}\n\nLink Tai: ${finalUrl}` : `Link Tai: ${finalUrl}`, {
             reply_markup: keyboard
         });
     }
