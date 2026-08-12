@@ -16,8 +16,27 @@ const {
     WEBHOOK_URL,
     TIKWMAPI_BASE,
     TIKWMAPI_KEY,
-    CF_CLEARANCE
+    CF_CLEARANCE,
+    PROXY_URL
 } = process.env;
+
+let axiosProxy = false;
+if (PROXY_URL) {
+    try {
+        const u = new URL(PROXY_URL);
+        axiosProxy = {
+            protocol: u.protocol.replace(':', ''),
+            host: u.hostname,
+            port: Number(u.port) || 80
+        };
+        if (u.username) {
+            axiosProxy.auth = { username: u.username, password: u.password };
+        }
+        console.log(`[PROXY_ENABLED] Routing requests via ${u.hostname}:${u.port || 80}`);
+    } catch (e) {
+        console.error('[PROXY_CONFIG_ERROR]', e.message);
+    }
+}
 
 const TIKWM_BASE = 'https://www.tikwm.com';
 const TIKWM_FREE_API = 'https://www.tikwm.com/api/';
@@ -27,7 +46,8 @@ const MAX_PAGES = 200;
 
 const tikwmPaidApi = axios.create({
     baseURL: TIKWMAPI_BASE || 'https://api.tikwmapi.com',
-    headers: TIKWMAPI_KEY ? { 'x-tikwmapi-key': TIKWMAPI_KEY } : {}
+    headers: TIKWMAPI_KEY ? { 'x-tikwmapi-key': TIKWMAPI_KEY } : {},
+    proxy: axiosProxy
 });
 
 const bot = new TelegramBot(BOT_TOKEN, {
@@ -99,7 +119,8 @@ async function getVideoStream(url) {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Referer': 'https://www.tiktok.com/'
-        }
+        },
+        proxy: axiosProxy
     });
     return data;
 }
@@ -118,7 +139,8 @@ async function fetchVideoData(originalLink) {
                 ...formData.getHeaders(),
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Referer': 'https://www.tikwm.com/'
-            }
+            },
+            proxy: axiosProxy
         });
 
         if (response.code === 0 && response.data) {
@@ -259,7 +281,7 @@ async function processUserVideos(chatId, username) {
             }
 
             try {
-                const { data: pageData } = await axios.post(TIKWM_FREE_USER_API, formData, { headers });
+                const { data: pageData } = await axios.post(TIKWM_FREE_USER_API, formData, { headers, proxy: axiosProxy });
 
                 if (typeof pageData === 'string' && pageData.includes('Just a moment')) {
                     console.log('[USER_POSTS] Cloudflare blocked free API, switching to paid fallback');
