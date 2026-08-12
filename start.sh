@@ -2,7 +2,7 @@
 
 # Khởi chạy Tailscale daemon ngầm ở chế độ userspace networking (Cần thiết cho PaaS/Render)
 echo "[INFO] Starting tailscaled in userspace-networking mode..."
-tailscaled --tun=userspace-networking --outbound-http-proxy-listen=localhost:1055 &
+tailscaled --tun=userspace-networking --outbound-http-proxy-listen=localhost:1055 > /dev/null 2>&1 &
 
 # Đợi daemon khởi động
 sleep 3
