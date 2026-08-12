@@ -386,22 +386,26 @@ async function sendUserVideo(chatId, username, video) {
 }
 
 bot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    console.log(`[BOT MSG] ChatID: ${chatId} | Text: ${text}`);
-    if (!text) return;
+    try {
+        const chatId = msg.chat.id;
+        const text = msg.text;
+        console.log(`[BOT MSG] ChatID: ${chatId} | Text: ${text}`);
+        if (!text) return;
 
-    const usernameMatch = text.match(/^u:(.+)$/);
-    if (usernameMatch) {
-        await processUserVideos(chatId, usernameMatch[1]);
-        return;
-    }
+        const usernameMatch = text.match(/^u:(.+)$/);
+        if (usernameMatch) {
+            await processUserVideos(chatId, usernameMatch[1]);
+            return;
+        }
 
-    const links = text.match(/https?:\/\/(?:www\.|vt\.|v\.)?(tiktok|douyin)\.com\/\S+/g);
-    if (links?.length) {
-        await handleTiktokLinks(chatId, msg, links);
-    } else {
-        await bot.sendMessage(chatId, 'Vui long gui link TikTok hop le hoac lenh u:username');
+        const links = text.match(/https?:\/\/(?:www\.|vt\.|v\.)?(tiktok|douyin)\.com\/\S+/g);
+        if (links?.length) {
+            await handleTiktokLinks(chatId, msg, links);
+        } else {
+            await bot.sendMessage(chatId, 'Vui long gui link TikTok hop le hoac lenh u:username');
+        }
+    } catch (e) {
+        console.error('[MESSAGE_HANDLER_ERROR]', e.message);
     }
 });
 
