@@ -116,12 +116,18 @@ async function processQueue(chatId) {
 }
 
 async function getVideoStream(url) {
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    };
+    if (url.includes('zjcdn.com') || url.includes('douyin')) {
+        headers['Referer'] = 'https://www.douyin.com/';
+    } else {
+        headers['Referer'] = 'https://www.tiktok.com/';
+    }
+
     const { data } = await axios.get(url, {
         responseType: 'stream',
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Referer': 'https://www.tiktok.com/'
-        },
+        headers,
         proxy: axiosProxy
     });
     return data;
@@ -293,7 +299,8 @@ async function sendVideoToTelegram(request, finalUrl, isHD, title) {
     } catch (error) {
         console.error('[SEND_VIDEO_FALLBACK]', error.message);
         try {
-            await bot.sendMessage(request.chatId.toString(), captionText ? `${captionText}\n\nLink HD: ${finalUrl}` : `Link HD: ${finalUrl}`, {
+            await bot.sendMessage(request.chatId.toString(), captionText ? `${captionText}\n\n[Nhấn vào đây để tải Link HD](${finalUrl})` : `[Nhấn vào đây để tải Link HD](${finalUrl})`, {
+                parse_mode: 'Markdown',
                 reply_markup: keyboard
             });
         } catch (e) { }
@@ -429,7 +436,8 @@ async function sendUserVideo(chatId, username, video) {
         }, { filename: 'video.mp4', contentType: 'video/mp4' });
     } catch (e) {
         console.error(`[USER_VIDEO_FALLBACK] ${video.video_id}:`, e.message);
-        await bot.sendMessage(chatId, captionText ? `${captionText}\n\nLink Tai: ${finalUrl}` : `Link Tai: ${finalUrl}`, {
+        await bot.sendMessage(chatId, captionText ? `${captionText}\n\n[Nhấn vào đây để tải Link](${finalUrl})` : `[Nhấn vào đây để tải Link](${finalUrl})`, {
+            parse_mode: 'Markdown',
             reply_markup: keyboard
         });
     }
