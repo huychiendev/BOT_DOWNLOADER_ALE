@@ -95,6 +95,15 @@ const requestSchema = new mongoose.Schema({
 const Video = mongoose.model('VideoDownload', videoSchema);
 const Request = mongoose.model('DownloadRequest', requestSchema);
 
+const subscriptionSchema = new mongoose.Schema({
+    chatId: String,
+    username: String,
+    lastVideoId: String,
+    status: { type: String, enum: ['active', 'paused'], default: 'active' },
+    timestamp: { type: Date, default: Date.now }
+});
+const Subscription = mongoose.model('Subscription', subscriptionSchema);
+
 app.get('/ping', (req, res) => { console.log('Ping received'); res.send('pong'); });
 app.get('/', async (req, res) => {
     try {
@@ -225,7 +234,7 @@ async function processLink(request) {
 
         const result = await fetchVideoData(request.originalLink);
         if (!result) {
-            await handleError(request, 'Khong the lay du lieu video tu server');
+            await handleError(request, 'Không thể lấy dữ liệu video từ server');
             return;
         }
 
@@ -254,7 +263,7 @@ async function processLink(request) {
         if (finalUrl) {
             await saveAndSendVideo(request, finalUrl, isHD, data.title);
         } else {
-            await handleError(request, 'Khong tim thay link video phu hop');
+            await handleError(request, 'Không tìm thấy link video phù hợp');
         }
     } catch (error) {
         console.error('Error:', error.message);
@@ -278,7 +287,7 @@ async function sendVideoToTelegram(request, finalUrl, isHD, title) {
     const captionText = ''; // Tắt caption theo yêu cầu
     const keyboard = {
         inline_keyboard: [[
-            { text: 'Xem link goc', url: request.originalLink },
+            { text: 'Xem link gốc', url: request.originalLink },
             { text: isHD ? 'Link HD' : 'Link Video', url: finalUrl }
         ]]
     };
@@ -309,20 +318,27 @@ async function sendVideoToTelegram(request, finalUrl, isHD, title) {
 
 async function handleError(request, errorMessage) {
     await Request.findByIdAndUpdate(request._id, { status: 'error', errorMessage });
-    await bot.sendMessage(request.chatId.toString(), `Co loi khi xu ly link: ${request.originalLink}`);
+    await bot.sendMessage(request.chatId.toString(), `Có lỗi khi xử lý link: ${request.originalLink}`);
 }
 
 // Fetch user channel posts with 2-tier fallback: Free API -> Paid API Key
-async function processUserVideos(chatId, username) {
+async function processUserVideos(chatId, username, isCron = false) {
     try {
-        const statusMsg = await bot.sendMessage(chatId, `Dang tai video tu kenh: ${username}...`);
+        let statusMsg;
+        if (!isCron) {
+            statusMsg = await bot.sendMessage(chatId, `Đang lấy danh sách video từ kênh: ${username}...`);
+        }
         let allVideos = [];
         let usePaidFallback = false;
         let cursor = 0;
+        let consecutiveOld = 0;
+        let shouldStop = false;
+
+        const limitPages = isCron ? 5 : MAX_PAGES; // Giới hạn trang khi chạy cron để bảo vệ an toàn
 
         // Tier 1: Try Free User API
         console.log(`[PROCESS_USER] Kenh: ${username} | Thu nghiem API_TIER: FREE (Goi TikWM API truc tiep)`);
-        for (let page = 1; page <= MAX_PAGES; page++) {
+        for (let page = 1; page <= limitPages; page++) {
             const formData = new FormData();
             formData.append('unique_id', username);
             formData.append('count', '30');
@@ -351,8 +367,23 @@ async function processUserVideos(chatId, username) {
 
                 if (!pageData || pageData.code !== 0 || !pageData.data?.videos?.length) break;
 
-                allVideos.push(...pageData.data.videos);
-                if (!pageData.data.hasMore) break;
+                for (const video of pageData.data.videos) {
+                    const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
+                    const exists = await Video.findOne({ originalLink });
+                    
+                    if (exists) {
+                        consecutiveOld++;
+                        if (consecutiveOld >= 6) { // Nếu gặp 6 video cũ liên tiếp (vượt qua số lượng video ghim) thì dừng
+                            shouldStop = true;
+                            break;
+                        }
+                    } else {
+                        consecutiveOld = 0; // Reset nếu gặp video mới xen kẽ
+                        allVideos.push(video);
+                    }
+                }
+                
+                if (shouldStop || !pageData.data.hasMore) break;
                 cursor = pageData.data.cursor;
             } catch (e) {
                 console.log('[USER_POSTS] Free API error, switching to paid fallback:', e.message);
@@ -368,7 +399,7 @@ async function processUserVideos(chatId, username) {
             allVideos = [];
             cursor = 0;
 
-            for (let page = 1; page <= MAX_PAGES; page++) {
+            for (let page = 1; page <= limitPages; page++) {
                 try {
                     const { data: pageData } = await tikwmPaidApi.get('/user/posts', {
                         params: { unique_id: username, count: 30, cursor }
@@ -376,8 +407,23 @@ async function processUserVideos(chatId, username) {
 
                     if (!pageData || pageData.code !== 0 || !pageData.data?.videos?.length) break;
 
-                    allVideos.push(...pageData.data.videos);
-                    if (!pageData.data.hasMore) break;
+                    for (const video of pageData.data.videos) {
+                        const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
+                        const exists = await Video.findOne({ originalLink });
+                        
+                        if (exists) {
+                            consecutiveOld++;
+                            if (consecutiveOld >= 6) {
+                                shouldStop = true;
+                                break;
+                            }
+                        } else {
+                            consecutiveOld = 0;
+                            allVideos.push(video);
+                        }
+                    }
+                    
+                    if (shouldStop || !pageData.data.hasMore) break;
                     cursor = pageData.data.cursor;
                 } catch (e) {
                     console.error('[USER_POSTS_PAID_ERR]', e.message);
@@ -387,13 +433,19 @@ async function processUserVideos(chatId, username) {
         }
 
         if (!allVideos.length) {
-            await bot.sendMessage(chatId, `Khong tim thay video tu kenh: ${username}`);
+            if (!isCron) {
+                await bot.sendMessage(chatId, `Không có video mới nào chưa được tải trên kênh: ${username}`);
+            }
             return;
         }
 
-        await bot.editMessageText(`Tim thay ${allVideos.length} video. Dang gui...`, {
-            chat_id: chatId, message_id: statusMsg.message_id
-        });
+        // Không cần lấy latestVideoId nữa vì ta dùng DB để check trực tiếp
+
+        if (!isCron) {
+            await bot.editMessageText(`Tìm thấy ${allVideos.length} video. Đang gửi...`, {
+                chat_id: chatId, message_id: statusMsg.message_id
+            });
+        }
 
         allVideos.reverse();
         let sent = 0;
@@ -405,10 +457,16 @@ async function processUserVideos(chatId, username) {
                 console.error(`[USER] Failed to send video ${video.video_id}:`, e.message);
             }
         }
-        await bot.sendMessage(chatId, `Da gui xong ${sent}/${allVideos.length} video tu kenh: ${username}`);
+        if (!isCron) {
+            await bot.sendMessage(chatId, `Đã gửi xong ${sent}/${allVideos.length} video mới từ kênh: ${username}`);
+        } else if (sent > 0) {
+            await bot.sendMessage(chatId, `[Auto] Đã tự động tải ${sent} video mới từ kênh: ${username}`);
+        }
     } catch (error) {
         console.error('User videos error:', error.message);
-        await bot.sendMessage(chatId, `Loi khi tai video tu kenh: ${username}`);
+        if (!isCron) {
+            await bot.sendMessage(chatId, `Lỗi khi tải video từ kênh: ${username}`);
+        }
     }
 }
 
@@ -423,12 +481,21 @@ async function sendUserVideo(chatId, username, video) {
     const originalLink = `https://www.tiktok.com/@${username}/video/${video.video_id}`;
     const keyboard = {
         inline_keyboard: [[
-            { text: 'Xem link goc', url: originalLink },
+            { text: 'Xem link gốc', url: originalLink },
             { text: 'Link Video', url: finalUrl }
         ]]
     };
 
     try {
+        // Lưu video vào DB để làm mốc check trùng lặp về sau
+        const dbVideo = new Video({
+            userName: 'AutoSub',
+            userHandle: username,
+            originalLink: originalLink,
+            processedLink: finalUrl
+        });
+        await dbVideo.save();
+
         const stream = await getVideoStream(finalUrl);
         await bot.sendVideo(chatId, stream, {
             caption: captionText,
@@ -440,6 +507,57 @@ async function sendUserVideo(chatId, username, video) {
             parse_mode: 'Markdown',
             reply_markup: keyboard
         });
+    }
+}
+
+async function subscribeUser(chatId, username) {
+    const existing = await Subscription.findOne({ chatId: chatId.toString(), username });
+    if (existing) {
+        await bot.sendMessage(chatId, `Bạn đã đăng ký theo dõi kênh ${username} rồi.`);
+        return;
+    }
+
+    await bot.sendMessage(chatId, `Đang tiến hành đăng ký kênh ${username}. Sẽ tải xuống toàn bộ video hiện có...`);
+    await processUserVideos(chatId, username);
+    
+    // Nếu hàm không throw error thì coi như thành công
+    const sub = new Subscription({
+        chatId: chatId.toString(),
+        username
+    });
+    await sub.save();
+    await bot.sendMessage(chatId, `Đã đăng ký thành công kênh ${username}! Từ giờ tôi sẽ kiểm tra và tải video mới hằng ngày.`);
+}
+
+async function unsubscribeUser(chatId, username) {
+    const deleted = await Subscription.findOneAndDelete({ chatId: chatId.toString(), username });
+    if (deleted) {
+        await bot.sendMessage(chatId, `Đã hủy theo dõi kênh ${username}.`);
+    } else {
+        await bot.sendMessage(chatId, `Bạn chưa theo dõi kênh ${username}.`);
+    }
+}
+
+async function listSubscriptions(chatId) {
+    const subs = await Subscription.find({ chatId: chatId.toString() });
+    if (subs.length === 0) {
+        await bot.sendMessage(chatId, 'Bạn chưa theo dõi kênh nào.');
+        return;
+    }
+    const msg = subs.map(s => `- ${s.username}`).join('\n');
+    await bot.sendMessage(chatId, `Danh sách các kênh đang theo dõi:\n${msg}`);
+}
+
+async function checkSubscriptionsDaily() {
+    console.log('[CRON] Running daily subscription check...');
+    try {
+        const subs = await Subscription.find({ status: 'active' });
+        for (const sub of subs) {
+            console.log(`[CRON] Checking updates for ${sub.username} (ChatID: ${sub.chatId})...`);
+            await processUserVideos(sub.chatId, sub.username, true);
+        }
+    } catch (e) {
+        console.error('[CRON_ERROR]', e.message);
     }
 }
 
@@ -456,11 +574,28 @@ bot.on('message', async (msg) => {
             return;
         }
 
+        if (text.startsWith('/sub ')) {
+            const username = text.split(' ')[1].trim();
+            if (username) await subscribeUser(chatId, username);
+            return;
+        }
+
+        if (text.startsWith('/unsub ')) {
+            const username = text.split(' ')[1].trim();
+            if (username) await unsubscribeUser(chatId, username);
+            return;
+        }
+
+        if (text === '/subs') {
+            await listSubscriptions(chatId);
+            return;
+        }
+
         const links = text.match(/https?:\/\/(?:www\.|vt\.|v\.)?(tiktok|douyin)\.com\/\S+/g);
         if (links?.length) {
             await handleTiktokLinks(chatId, msg, links);
         } else {
-            await bot.sendMessage(chatId, 'Vui long gui link TikTok hop le hoac lenh u:username');
+            await bot.sendMessage(chatId, 'Vui lòng gửi link TikTok hợp lệ hoặc lệnh u:username');
         }
     } catch (e) {
         console.error('[MESSAGE_HANDLER_ERROR]', e.message);
@@ -468,7 +603,7 @@ bot.on('message', async (msg) => {
 });
 
 async function handleTiktokLinks(chatId, msg, links) {
-    const processingMsg = await bot.sendMessage(chatId, `Da them ${links.length} video vao hang doi...`);
+    const processingMsg = await bot.sendMessage(chatId, `Đã thêm ${links.length} video vào hàng đợi...`);
     userQueues[chatId] = userQueues[chatId] || [];
     const userName = msg.from.first_name + (msg.from.last_name ? ' ' + msg.from.last_name : '');
     const userHandle = msg.from.username || 'N/A';
@@ -494,4 +629,11 @@ function generateDashboardHTML(videos, requests) {
 
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 setInterval(() => axios.get(WEBHOOK_URL).catch(() => { }), PING_INTERVAL);
-console.log('Bot started - Clean Standalone Engine with Multi-Tier Fallback');
+
+// Check updates every 12 hours (43200000 ms)
+const CHECK_INTERVAL = 12 * 60 * 60 * 1000; 
+setInterval(checkSubscriptionsDaily, CHECK_INTERVAL);
+// Start a check 10 seconds after bot boot up
+setTimeout(checkSubscriptionsDaily, 10000);
+
+console.log('Bot started - Clean Standalone Engine with Multi-Tier Fallback & Subscriptions');
